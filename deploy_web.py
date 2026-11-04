@@ -33,10 +33,13 @@ def _create_app_with_persistent_session(auth_code=None):
     # 每次响应都续期 Cookie(滑动过期):只要两次访问间隔不超过有效期,就永不掉登录
     app.config["SESSION_REFRESH_EACH_REQUEST"] = True
 
-    @app.before_request
-    def _deploy_session_keep_alive():
-        # 强制持久会话:忽略登录页"记住我"勾选,任何登录都写入持久 Cookie
+    @app.after_request
+    def _deploy_session_keep_alive(response):
+        # 必须用 after_request:上游登录视图会在请求阶段把 permanent 覆写回
+        # "记住我"勾选值(False),而 Flask 是在 after_request 之后才序列化
+        # Cookie,在这里强制改回持久会话即可稳定生效。
         session.permanent = True
+        return response
 
     return app
 
