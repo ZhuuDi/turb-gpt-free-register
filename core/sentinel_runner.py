@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 
 from config import openai_protocol as protocol_settings
@@ -38,14 +39,35 @@ def _ensure_runner_environment(sdk_path=None) -> None:
 
 
 def _run_node(cmd, *, input, cwd, timeout, env):
-    """有界、可停止地通信；停止/超时时 kill 并回收子进程和管道。"""
+    """有界、可停止地通信；停止/超时时 kill 并回收子进程和管道。
+
+    stdin 由独立线程一次性喂入并关闭：分片循环里反复 communicate(input=...)
+    会触发 CPython 的 "Cannot send input more than once"；而改传 None 后
+    CPython 既不续写剩余输入也不会关闭 stdin，大 payload（如 email_otp_validate
+    回退路径携带的数百 KB requirements token）会让 Node 在 readFileSync(0)
+    上一直等不到 EOF，直到 60s 超时被杀。
+    """
     from core.openai_auth import _check_stop_requested
     _check_stop_requested()
     deadline = time.monotonic() + timeout
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True, encoding='utf-8',
                           cwd=cwd, env=env) as proc:
-        pending_input = input
+        def _feed_stdin():
+            try:
+                if input:
+                    proc.stdin.write(input)
+                    proc.stdin.flush()
+            except Exception:
+                # 子进程提前退出/被 kill 时管道断开，属预期，静默收尾。
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+        feeder = threading.Thread(target=_feed_stdin, daemon=True, name='sentinel-stdin')
+        feeder.start()
         try:
             while True:
                 _check_stop_requested()
@@ -53,12 +75,11 @@ def _run_node(cmd, *, input, cwd, timeout, env):
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(cmd, timeout)
                 try:
-                    stdout, stderr = proc.communicate(input=pending_input, timeout=min(0.25, remaining))
+                    stdout, stderr = proc.communicate(timeout=min(0.25, remaining))
                     _check_stop_requested()
                     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
                 except subprocess.TimeoutExpired:
-                    # communicate 保留上次尚未写完的输入，后续不得重复传入。
-                    pending_input = None
+                    continue
         except BaseException:
             if proc.poll() is None:
                 proc.kill()
