@@ -21,6 +21,7 @@
 import json
 import logging
 import math
+import random
 import threading
 import time
 from decimal import Decimal, InvalidOperation
@@ -629,10 +630,18 @@ def acquire_number(
             )
             return activation_id, phone
 
+        country_value = country or _cfg.SMS_COUNTRY
+        # 支持逗号分隔多国家（如 SMS_COUNTRY="33,2"）：每次取号随机选一个。
+        # handler_api 的 country 参数必须是单个数字，多值只能由本层轮换实现；
+        # 失败换号的下一次取号会重新随机，从而在多个国家间分散。
+        if "," in str(country_value):
+            _candidates = [c.strip() for c in str(country_value).split(",") if c.strip()]
+            if _candidates:
+                country_value = random.choice(_candidates)
         params = {
             "action": "getNumber",
             "service": service or _cfg.SMS_SERVICE,
-            "country": country or _cfg.SMS_COUNTRY,
+            "country": country_value,
         }
         if _cfg.SMS_MAX_PRICE:
             params["maxPrice"] = _cfg.SMS_MAX_PRICE
