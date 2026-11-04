@@ -1602,6 +1602,12 @@ def save_codex_credential(storage: dict, email: str, plan_type: str) -> str:
     """保存 Codex 凭证到 SQLite，不创建本地文件。"""
     fname = _credential_file_name(email, plan_type)
     db.upsert_codex_credential(storage, fname)
+    try:
+        # 部署私有增强：凭证落库后自动导入 sub2api 账号池（fire-and-forget，见 core/sub2api_export.py）
+        from core.sub2api_export import export_codex_session_async
+        export_codex_session_async(email, storage)
+    except Exception:
+        logger.debug("[Codex] sub2api 自动导入调度失败", exc_info=True)
     return f"sqlite://codex_accounts/{fname}"
 
 

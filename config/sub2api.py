@@ -11,6 +11,12 @@ SUB2API_AUTO_EXPORT: bool = True
 # both = 接口上传成功/失败不影响本地文件同步
 SUB2API_SYNC_MODE: str = "api"
 
+# Codex OAuth 凭证保存成功后，自动把凭证（codex session JSON）导入 sub2api 账号池。
+# 依赖 SUB2API_API_BASE / SUB2API_API_KEY（x-api-key 权限管理密钥，需含「创建账户」权限）。
+# 导入的账号绑定 SUB2API_IMPORT_GROUP_ID 指定的分组。
+SUB2API_IMPORT_OAUTH: bool = True
+SUB2API_IMPORT_GROUP_ID: int = 2
+
 # sub2api API 基址；Agent Token 上传和 Codex OAuth 都复用这个地址。
 SUB2API_API_BASE: str = ""
 
@@ -72,6 +78,8 @@ SUB2_CODEX_CALLBACK_PAYLOAD_MODE: str = "create_from_oauth"
 apply_env_overrides(globals(), {
     'SUB2API_AUTO_EXPORT': 'bool',
     'SUB2API_SYNC_MODE': 'str',
+    'SUB2API_IMPORT_OAUTH': 'bool',
+    'SUB2API_IMPORT_GROUP_ID': 'int',
     'SUB2API_API_BASE': 'str',
     'SUB2API_API_URL': 'str',
     'SUB2API_API_KEY': 'str',
