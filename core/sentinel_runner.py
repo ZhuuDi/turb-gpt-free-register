@@ -41,51 +41,78 @@ def _ensure_runner_environment(sdk_path=None) -> None:
 def _run_node(cmd, *, input, cwd, timeout, env):
     """有界、可停止地通信；停止/超时时 kill 并回收子进程和管道。
 
-    stdin 由独立线程一次性喂入并关闭：分片循环里反复 communicate(input=...)
-    会触发 CPython 的 "Cannot send input more than once"；而改传 None 后
-    CPython 既不续写剩余输入也不会关闭 stdin，大 payload（如 email_otp_validate
-    回退路径携带的数百 KB requirements token）会让 Node 在 readFileSync(0)
-    上一直等不到 EOF，直到 60s 超时被杀。
+    stdin 用自建 os.pipe 由独立线程喂入，不再使用 Popen(stdin=PIPE)：
+    1) 分片循环里反复 communicate(input=...) 会触发 CPython 的
+       "Cannot send input more than once"；改传 None 后 CPython 既不续写
+       剩余输入也不关闭 stdin，大 payload（如 email_otp_validate 回退路径
+       携带的数百 KB requirements token）会让 Node 在 readFileSync(0) 上
+       一直等不到 EOF，直到 60s 超时被杀；
+    2) 而若由我们自己关闭 proc.stdin，communicate 结束时会再关一次，
+       抛 "ValueError: I/O operation on closed file"。
+       自建管道 + os.close 原始 fd 可同时避开这两个坑（proc.stdin 恒为 None）。
     """
     from core.openai_auth import _check_stop_requested
     _check_stop_requested()
     deadline = time.monotonic() + timeout
-    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=True, encoding='utf-8',
-                          cwd=cwd, env=env) as proc:
-        def _feed_stdin():
-            try:
-                if input:
-                    proc.stdin.write(input)
-                    proc.stdin.flush()
-            except Exception:
-                # 子进程提前退出/被 kill 时管道断开，属预期，静默收尾。
-                pass
-            finally:
+    r_fd, w_fd = os.pipe()
+    r_open = True
+    feeder_started = False
+    try:
+        with subprocess.Popen(cmd, stdin=r_fd, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, encoding='utf-8',
+                              cwd=cwd, env=env) as proc:
+            os.close(r_fd)
+            r_open = False
+
+            def _feed_stdin():
+                nonlocal feeder_started
+                feeder_started = True
                 try:
-                    proc.stdin.close()
+                    if input:
+                        data = input.encode('utf-8')
+                        while data:
+                            n = os.write(w_fd, data[:65536])
+                            data = data[n:]
                 except Exception:
+                    # 子进程提前退出/被 kill 时管道断开，属预期，静默收尾。
                     pass
-        feeder = threading.Thread(target=_feed_stdin, daemon=True, name='sentinel-stdin')
-        feeder.start()
-        try:
-            while True:
-                _check_stop_requested()
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(cmd, timeout)
-                try:
-                    stdout, stderr = proc.communicate(timeout=min(0.25, remaining))
+                finally:
+                    try:
+                        os.close(w_fd)
+                    except Exception:
+                        pass
+            feeder = threading.Thread(target=_feed_stdin, daemon=True, name='sentinel-stdin')
+            feeder.start()
+            try:
+                while True:
                     _check_stop_requested()
-                    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-                except subprocess.TimeoutExpired:
-                    continue
-        except BaseException:
-            if proc.poll() is None:
-                proc.kill()
-            # 异常路径不再解码输出，避免坏UTF-8掩盖原始停止/超时异常。
-            proc.wait()
-            raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(cmd, timeout)
+                    try:
+                        stdout, stderr = proc.communicate(timeout=min(0.25, remaining))
+                        _check_stop_requested()
+                        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+                    except subprocess.TimeoutExpired:
+                        continue
+            except BaseException:
+                if proc.poll() is None:
+                    proc.kill()
+                # 异常路径不再解码输出，避免坏UTF-8掩盖原始停止/超时异常。
+                proc.wait()
+                raise
+    finally:
+        if r_open:
+            try:
+                os.close(r_fd)
+            except Exception:
+                pass
+        if not feeder_started:
+            # Popen 本身失败时喂入线程未启动，写端由这里兜底关闭。
+            try:
+                os.close(w_fd)
+            except Exception:
+                pass
 
 
 def generate_sentinel_token(
