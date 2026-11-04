@@ -6,14 +6,17 @@ services:
     image: turb-gpt:latest
     container_name: turb-gpt-app
     restart: unless-stopped
-    # 默认只绑本机回环:用 SSH 隧道访问,不暴露公网。
-    # 确需公网访问时改为 "5000:5000",并务必设置强 WEBUI_AUTH_CODE。
+    # 公网访问:宿主机 18050 -> 容器 5000(非默认高位端口,减少扫描噪音)。
+    # 鉴权依赖 deploy_web.py 的持久会话 + .env 的强 WEBUI_AUTH_CODE。
+    # 如需收回为仅本机访问,改回 "127.0.0.1:5000:5000" 并用 SSH 隧道。
     ports:
-      - "127.0.0.1:5000:5000"
+      - "18050:5000"
     volumes:
       # 部署目录整体挂载为 /app:代码、turb.sqlite3、日志、缓存都在宿主机,
       # git push 更新代码后 docker compose restart 即可,无需重建镜像
       - .:/app
+    # 启动入口用部署私有包装器(deploy_web.py):持久会话 + 滑动续期,其余与上游 web.py 一致
+    command: python deploy_web.py --host 0.0.0.0 --port 5000
     environment:
       TZ: Asia/Shanghai
     mem_limit: 1g
